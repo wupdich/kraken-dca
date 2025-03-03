@@ -3,8 +3,8 @@ const crypto = require("crypto");
 const https = require("https");
 
 /**
- * Kraken DCA Bot
- * by @codepleb
+ * Kraken Multi-Crypto DCA Bot
+ * Original by @codepleb, enhanced for multi-crypto support
  *
  * Donations in BTC: bc1q4et8wxhsguz8hsm46pnuvq7h68up8mlw6fhqyt
  * Donations in Lightning-BTC (Telegram): codepleb@ln.tips
@@ -15,12 +15,26 @@ const main = async () => {
   const KRAKEN_API_PRIVATE_KEY = process.env.KRAKEN_API_PRIVATE_KEY; // Kraken API private key
   const CURRENCY = process.env.CURRENCY || "USD"; // Choose the currency that you are depositing regularly. Check here how you currency has to be named: https://docs.kraken.com/rest/#operation/getAccountBalance
   const DATE_OF_CASH_REFILL = Number(process.env.DATE_OF_CASH_REFILL); // OPTIONAL! Day of month, where new funds get deposited regularly (ignore weekends, that will be handled automatically)
-  const KRAKEN_WITHDRAWAL_ADDRESS_KEY =
-    process.env.KRAKEN_WITHDRAWAL_ADDRESS_KEY || false; // OPTIONAL! The "Description" (name) of the whitelisted bitcoin address on kraken. Don't set this option if you don't want automatic withdrawals.
-  const WITHDRAW_TARGET = Number(process.env.WITHDRAW_TARGET) || false; // OPTIONAL! If you set the withdrawal key option but you don't want to withdraw once a month, but rather when reaching a certain amount of accumulated bitcoin, use this variable to override the "withdraw on date" functionality.
-  const KRAKEN_BTC_ORDER_SIZE =
-    Number(process.env.KRAKEN_BTC_ORDER_SIZE) || 0.0001; // OPTIONAL! Changing this value is not recommended. Kraken currently has a minimum order size of 0.0001 BTC. You can adapt it if you prefer fewer buys (for better tax management or other reasons).
   const FIAT_CHECK_DELAY = Number(process.env.FIAT_CHECK_DELAY) || 60 * 1000; // OPTIONAL! Custom fiat check delay. This delay should not be smaller than the delay between orders.
+  
+  // Crypto configuration
+  const BTC_ALLOCATION = Number(process.env.BTC_ALLOCATION) || 50; // Default allocation: 50%
+  const ETH_ALLOCATION = Number(process.env.ETH_ALLOCATION) || 25; // Default allocation: 25%
+  const SOL_ALLOCATION = Number(process.env.SOL_ALLOCATION) || 25; // Default allocation: 25%
+  
+  // Minimum order sizes
+  const KRAKEN_BTC_ORDER_SIZE = Number(process.env.KRAKEN_BTC_ORDER_SIZE) || 0.0001; // Minimum BTC order
+  const KRAKEN_ETH_ORDER_SIZE = Number(process.env.KRAKEN_ETH_ORDER_SIZE) || 0.004; // Minimum ETH order
+  const KRAKEN_SOL_ORDER_SIZE = Number(process.env.KRAKEN_SOL_ORDER_SIZE) || 0.04; // Minimum SOL order
+  
+  // Withdrawal configuration
+  const KRAKEN_BTC_WITHDRAWAL_ADDRESS_KEY = process.env.KRAKEN_WITHDRAWAL_ADDRESS_KEY || false;
+  const KRAKEN_ETH_WITHDRAWAL_ADDRESS_KEY = process.env.KRAKEN_ETH_WITHDRAWAL_ADDRESS_KEY || false;
+  const KRAKEN_SOL_WITHDRAWAL_ADDRESS_KEY = process.env.KRAKEN_SOL_WITHDRAWAL_ADDRESS_KEY || false;
+  
+  const BTC_WITHDRAW_TARGET = Number(process.env.WITHDRAW_TARGET) || false;
+  const ETH_WITHDRAW_TARGET = Number(process.env.ETH_WITHDRAW_TARGET) || false;
+  const SOL_WITHDRAW_TARGET = Number(process.env.SOL_WITHDRAW_TARGET) || false;
 
   const PUBLIC_API_PATH = "/0/public/";
   const PRIVATE_API_PATH = "/0/private/";
@@ -32,6 +46,49 @@ const main = async () => {
     fiatPrefix = "Z";
   }
 
+  // Define crypto assets configuration
+  const cryptoAssets = {
+    BTC: {
+      symbol: "XBT", // Kraken uses XBT for Bitcoin
+      responseKey: "XXBT", // How it appears in balance response
+      allocation: BTC_ALLOCATION,
+      orderSize: KRAKEN_BTC_ORDER_SIZE,
+      withdrawalAddressKey: KRAKEN_BTC_WITHDRAWAL_ADDRESS_KEY,
+      withdrawTarget: BTC_WITHDRAW_TARGET,
+      lastPrice: Number.NEGATIVE_INFINITY,
+      dateOfNextOrder: new Date(),
+      noSuccessfulBuyYet: true,
+      allocatedFiat: 0,
+      symbol_display: "₿"
+    },
+    ETH: {
+      symbol: "ETH",
+      responseKey: "XETH", // Based on Kraken's pattern
+      allocation: ETH_ALLOCATION,
+      orderSize: KRAKEN_ETH_ORDER_SIZE,
+      withdrawalAddressKey: KRAKEN_ETH_WITHDRAWAL_ADDRESS_KEY,
+      withdrawTarget: ETH_WITHDRAW_TARGET,
+      lastPrice: Number.NEGATIVE_INFINITY,
+      dateOfNextOrder: new Date(),
+      noSuccessfulBuyYet: true,
+      allocatedFiat: 0,
+      symbol_display: "ETH"
+    },
+    SOL: {
+      symbol: "SOL",
+      responseKey: "XSOL", // Based on Kraken's pattern
+      allocation: SOL_ALLOCATION,
+      orderSize: KRAKEN_SOL_ORDER_SIZE,
+      withdrawalAddressKey: KRAKEN_SOL_WITHDRAWAL_ADDRESS_KEY,
+      withdrawTarget: SOL_WITHDRAW_TARGET,
+      lastPrice: Number.NEGATIVE_INFINITY,
+      dateOfNextOrder: new Date(),
+      noSuccessfulBuyYet: true,
+      allocatedFiat: 0,
+      symbol_display: "SOL"
+    }
+  };
+
   const { log } = console;
 
   const withdrawalDate = new Date();
@@ -39,30 +96,28 @@ const main = async () => {
   withdrawalDate.setMonth(withdrawalDate.getMonth() + 1);
 
   let lastFiatBalance = Number.NEGATIVE_INFINITY;
-  let lastBtcFiatPrice = Number.NEGATIVE_INFINITY;
   let dateOfEmptyFiat = new Date();
-  let dateOfNextOrder = new Date();
-
   let logQueue = [`[${new Date().toLocaleString()}]`];
   let firstRun = true;
   let interrupted = 0;
-  let noSuccessfulBuyYet = true;
-
+  
   let fiatAmount = undefined;
 
   log();
-  log("|===========================================================|");
-  log("|                     ------------------                    |");
-  log("|                     |   Kraken DCA   |                    |");
-  log("|                     ------------------                    |");
-  log("|                        by @codepleb                       |");
-  log("|                                                           |");
-  log("| Donations BTC: bc1q4et8wxhsguz8hsm46pnuvq7h68up8mlw6fhqyt |");
-  log("| Donations Lightning-BTC (Telegram): codepleb@ln.tips      |");
-  log("|===========================================================|");
+  log("|=================================================================|");
+  log("|                     ---------------------------                  |");
+  log("|                     |   Kraken Multi-DCA Bot   |                 |");
+  log("|                     ---------------------------                  |");
+  log("|                         Original by @codepleb                    |");
+  log("|                                                                  |");
+  log("| Donations BTC: bc1q4et8wxhsguz8hsm46pnuvq7h68up8mlw6fhqyt        |");
+  log("| Donations Lightning-BTC (Telegram): codepleb@ln.tips             |");
+  log("|=================================================================|");
   log();
-  log("DCA activated now!");
+  log("Multi-Crypto DCA activated now!");
   log("Fiat currency to be used:", CURRENCY);
+  log(`Allocations: BTC: ${BTC_ALLOCATION}%, ETH: ${ETH_ALLOCATION}%, SOL: ${SOL_ALLOCATION}%`);
+  log(`Minimum order sizes: BTC: ${KRAKEN_BTC_ORDER_SIZE}, ETH: ${KRAKEN_ETH_ORDER_SIZE}, SOL: ${KRAKEN_SOL_ORDER_SIZE}`);
 
   const runner = async () => {
     while (true) {
@@ -82,6 +137,12 @@ const main = async () => {
           continue;
         }
 
+        // Update crypto balances from Kraken
+        for (const key in cryptoAssets) {
+          const asset = cryptoAssets[key];
+          asset.balance = Number(balance?.[asset.responseKey]) || 0;
+        }
+
         logQueue.push(`Fiat: ${Number(fiatAmount).toFixed(2)} ${CURRENCY}`);
         const newFiatArrived = fiatAmount > lastFiatBalance;
         if (newFiatArrived || firstRun) {
@@ -91,50 +152,61 @@ const main = async () => {
           logQueue.push(
             `Empty fiat @ approx. ${dateOfEmptyFiat.toLocaleString()}`
           );
+          
+          // Calculate allocated fiat for each crypto
+          for (const key in cryptoAssets) {
+            const asset = cryptoAssets[key];
+            asset.allocatedFiat = fiatAmount * (asset.allocation / 100);
+            logQueue.push(`${key} allocation: ${asset.allocatedFiat.toFixed(2)} ${CURRENCY} (${asset.allocation}%)`);
+          }
         }
 
-        lastBtcFiatPrice = await fetchBtcFiatPrice();
-        if (!lastBtcFiatPrice) {
-          printInvalidCurrencyError();
-          await timer(FIAT_CHECK_DELAY);
-          continue;
+        // Fetch prices for all cryptos
+        for (const key in cryptoAssets) {
+          const asset = cryptoAssets[key];
+          asset.lastPrice = await fetchCryptoPrice(asset);
+          if (!asset.lastPrice) {
+            console.error(`Failed to fetch price for ${key}!`);
+            continue;
+          }
+          logQueue.push(`${key} Price: ${asset.lastPrice.toFixed(2)} ${CURRENCY}`);
         }
-        logQueue.push(`BTC Price: ${lastBtcFiatPrice.toFixed(2)} ${CURRENCY}`);
 
-        const btcAmount = Number(balance?.XXBT);
-        if (!btcAmount && btcAmount !== 0) {
-          printInvalidBtcHoldings();
-          await timer(FIAT_CHECK_DELAY);
-          continue;
-        }
         const now = Date.now();
-        // ---|--o|---|---|---|---|-o-|---
-        //  x  ===  x   x   x   x  ===  x
-        if (dateOfNextOrder < now || newFiatArrived) {
-          await buyBitcoin(logQueue);
-          evaluateMillisUntilNextOrder();
-          buyOrderExecuted = true;
+        // Process each crypto
+        for (const key in cryptoAssets) {
+          const asset = cryptoAssets[key];
+          
+          // Skip if price couldn't be fetched
+          if (!asset.lastPrice) continue;
+          
+          // Check if it's time to buy
+          if (asset.dateOfNextOrder < now || newFiatArrived) {
+            await buyCrypto(asset);
+            evaluateMillisUntilNextOrder(asset);
+            buyOrderExecuted = true;
+          }
+          
+          // Calculate and log balance
+          const newCryptoAmount = asset.balance + asset.orderSize;
+          const precision = String(asset.orderSize).split(".")[1]?.length || 0;
+          logQueue.push(
+            `Accumulated ${key}: ${newCryptoAmount.toFixed(precision)} ${asset.symbol_display}`
+          );
+          
+          logQueue.push(
+            `Next ${key} order in: ${formatTimeToHoursAndLess(
+              asset.dateOfNextOrder.getTime() - Date.now()
+            )} @ ${asset.dateOfNextOrder.toLocaleString().split(", ")[1]}`
+          );
+          
+          // Check for withdrawal
+          if (buyOrderExecuted && isWithdrawalDue(asset, newCryptoAmount)) {
+            await withdrawCrypto(asset, newCryptoAmount);
+          }
         }
-
-        const newBtcAmount = btcAmount + KRAKEN_BTC_ORDER_SIZE;
-        logQueue.push(
-          `Accumulated BTC: ${newBtcAmount.toFixed(
-            String(KRAKEN_BTC_ORDER_SIZE).split(".")[1].length
-          )} ₿`
-        );
-
-        logQueue.push(
-          `Next order in: ${formatTimeToHoursAndLess(
-            dateOfNextOrder.getTime() - Date.now()
-          )} @ ${dateOfNextOrder.toLocaleString().split(", ")[1]}`
-        );
 
         flushLogging(buyOrderExecuted);
-
-        if (buyOrderExecuted && isWithdrawalDue(newBtcAmount)) {
-          await withdrawBtc(newBtcAmount);
-        }
-
         await timer(FIAT_CHECK_DELAY);
       } catch (e) {
         console.error("General Error. :/", e);
@@ -273,35 +345,46 @@ const main = async () => {
     return signatureString;
   };
 
-  const buyBitcoin = async () => {
+  const fetchCryptoPrice = async (asset) => {
+    return Number(
+      (
+        await queryPublicApi(
+          "Ticker",
+          `pair=${cryptoPrefix}${asset.symbol}${fiatPrefix}${CURRENCY}`
+        )
+      )?.result?.[`${cryptoPrefix}${asset.symbol}${fiatPrefix}${CURRENCY}`]?.p?.[0]
+    );
+  };
+
+  const buyCrypto = async (asset) => {
     let buyOrderResponse;
     try {
-      buyOrderResponse = await executeBuyOrder();
+      buyOrderResponse = await executeBuyOrder(asset);
       if (buyOrderResponse?.error?.length !== 0) {
         console.error(
-          "Buy-Order response had invalid structure! Skipping this buy order."
+          `Buy-Order response for ${asset.symbol} had invalid structure! Skipping this buy order.`
         );
       } else {
-        noSuccessfulBuyYet = false;
+        asset.noSuccessfulBuyYet = false;
         logQueue.push(
           `Kraken: ${buyOrderResponse?.result?.descr?.order} > Success!`
         );
         logQueue.push(
-          `Bought for ~${(lastBtcFiatPrice * KRAKEN_BTC_ORDER_SIZE).toFixed(
+          `Bought ${asset.symbol} for ~${(asset.lastPrice * asset.orderSize).toFixed(
             2
           )} ${CURRENCY}`
         );
       }
     } catch (e) {
       console.error(
-        "Buy order request failed! Probably a temporary issue with Kraken, if you don't see this error right from the start. Skipping this one."
+        `Buy order request for ${asset.symbol} failed! Probably a temporary issue with Kraken, if you don't see this error right from the start. Skipping this one.`
       );
     }
   };
 
-  const executeBuyOrder = async () => {
+  const executeBuyOrder = async (asset) => {
     const privateEndpoint = "AddOrder";
-    const privateInputParameters = `pair=xbt${CURRENCY.toLowerCase()}&type=buy&ordertype=market&volume=${KRAKEN_BTC_ORDER_SIZE}`;
+    const privateInputParameters = `pair=${asset.symbol.toLowerCase()}${CURRENCY.toLowerCase()}&type=buy&ordertype=market&volume=${asset.orderSize}`;
     let privateResponse = "";
     privateResponse = await queryPrivateApi(
       privateEndpoint,
@@ -310,9 +393,9 @@ const main = async () => {
     return privateResponse;
   };
 
-  const executeWithdrawal = async (amount) => {
+  const executeWithdrawal = async (asset, amount) => {
     const privateEndpoint = "Withdraw";
-    const privateInputParameters = `asset=XBT&key=${KRAKEN_WITHDRAWAL_ADDRESS_KEY}&amount=${amount}`;
+    const privateInputParameters = `asset=${asset.symbol}&key=${asset.withdrawalAddressKey}&amount=${amount}`;
     let privateResponse = "";
     privateResponse = await queryPrivateApi(
       privateEndpoint,
@@ -330,30 +413,27 @@ const main = async () => {
     return false;
   };
 
-  const isWithdrawalDue = (btcAmount) =>
-    (KRAKEN_WITHDRAWAL_ADDRESS_KEY &&
-      !WITHDRAW_TARGET &&
+  const isWithdrawalDue = (asset, amount) =>
+    (asset.withdrawalAddressKey &&
+      !asset.withdrawTarget &&
       isWithdrawalDateDue()) ||
-    (KRAKEN_WITHDRAWAL_ADDRESS_KEY &&
-      WITHDRAW_TARGET &&
-      WITHDRAW_TARGET <= btcAmount);
-
-  const fetchBtcFiatPrice = async () =>
-    Number(
-      (
-        await queryPublicApi(
-          "Ticker",
-          `pair=${cryptoPrefix}XBT${fiatPrefix}${CURRENCY}`
-        )
-      )?.result?.[`${cryptoPrefix}XBT${fiatPrefix}${CURRENCY}`]?.p?.[0]
-    );
+    (asset.withdrawalAddressKey &&
+      asset.withdrawTarget &&
+      asset.withdrawTarget <= amount);
 
   const printInvalidCurrencyError = () => {
     flushLogging();
     console.error(
       "Probably invalid currency symbol! If this happens at bot startup, please fix it. If you see this message after a lot of time, it might just be a failed request that will repair itself automatically."
     );
-    if (++interrupted >= 3 && noSuccessfulBuyYet) {
+    let allFailed = true;
+    for (const key in cryptoAssets) {
+      if (!cryptoAssets[key].noSuccessfulBuyYet) {
+        allFailed = false;
+        break;
+      }
+    }
+    if (++interrupted >= 3 && allFailed) {
       throw Error("Interrupted! Too many failed API calls.");
     }
   };
@@ -361,7 +441,7 @@ const main = async () => {
   const printInvalidBtcHoldings = () => {
     flushLogging();
     console.error(
-      "Couldn't fetch Bitcoin holdings. This is most probably a temporary issue with kraken, that will fix itself."
+      "Couldn't fetch crypto holdings. This is most probably a temporary issue with kraken, that will fix itself."
     );
   };
 
@@ -370,14 +450,21 @@ const main = async () => {
     console.error(
       "Could not query the balance on your account. Either incorrect API key or key-permissions on kraken!"
     );
-    if (++interrupted >= 3 && noSuccessfulBuyYet) {
+    let allFailed = true;
+    for (const key in cryptoAssets) {
+      if (!cryptoAssets[key].noSuccessfulBuyYet) {
+        allFailed = false;
+        break;
+      }
+    }
+    if (++interrupted >= 3 && allFailed) {
       throw Error("Interrupted! Too many failed API calls.");
     }
   };
 
-  const withdrawBtc = async (btcAmount) => {
-    console.log(`Attempting to withdraw ${btcAmount} ₿ ...`);
-    const withdrawal = await executeWithdrawal(btcAmount);
+  const withdrawCrypto = async (asset, amount) => {
+    console.log(`Attempting to withdraw ${amount} ${asset.symbol} ...`);
+    const withdrawal = await executeWithdrawal(asset, amount);
     if (withdrawal?.result?.refid)
       console.log(`Withdrawal executed! Date: ${new Date().toLocaleString()}!`);
     else console.error(`Withdrawal failed! ${withdrawal?.error}`);
@@ -403,26 +490,27 @@ const main = async () => {
       dateOfEmptyFiat.setDate(dateOfEmptyFiat.getDate() - 1);
   };
 
-  const evaluateMillisUntilNextOrder = () => {
-    if (lastBtcFiatPrice > 0) {
-      const myFiatValueInBtc = fiatAmount / lastBtcFiatPrice;
+  const evaluateMillisUntilNextOrder = (asset) => {
+    if (asset.lastPrice > 0) {
+      const allocatedFiat = asset.allocatedFiat || (fiatAmount * (asset.allocation / 100));
+      const valueInCrypto = allocatedFiat / asset.lastPrice;
       const approximatedAmoutOfOrdersUntilFiatRefill =
-        myFiatValueInBtc / KRAKEN_BTC_ORDER_SIZE;
+        valueInCrypto / asset.orderSize;
 
       if (approximatedAmoutOfOrdersUntilFiatRefill < 1) {
         console.error(
-          `Cannot estimate time for next order. Fiat: ${fiatAmount}, Last BTC price: ${lastBtcFiatPrice}`
+          `Cannot estimate time for next ${asset.symbol} order. Allocated Fiat: ${allocatedFiat}, Last ${asset.symbol} price: ${asset.lastPrice}`
         );
       } else {
         const now = Date.now();
-        dateOfNextOrder = new Date(
+        asset.dateOfNextOrder = new Date(
           (dateOfEmptyFiat.getTime() - now) /
             approximatedAmoutOfOrdersUntilFiatRefill +
             now
         );
       }
     } else {
-      console.error("Last BTC fiat price was not present!");
+      console.error(`Last ${asset.symbol} price was not present!`);
     }
   };
 
