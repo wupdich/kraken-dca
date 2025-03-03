@@ -76,7 +76,7 @@ const main = async () => {
     },
     SOL: {
       symbol: "SOL",
-      responseKey: "XSOL", // Based on Kraken's pattern
+      responseKey: "SOL", // Changed from XSOL to SOL for Kraken API compatibility
       allocation: SOL_ALLOCATION,
       orderSize: KRAKEN_SOL_ORDER_SIZE,
       withdrawalAddressKey: KRAKEN_SOL_WITHDRAWAL_ADDRESS_KEY,
@@ -119,7 +119,21 @@ const main = async () => {
   log(`Allocations: BTC: ${BTC_ALLOCATION}%, ETH: ${ETH_ALLOCATION}%, SOL: ${SOL_ALLOCATION}%`);
   log(`Minimum order sizes: BTC: ${KRAKEN_BTC_ORDER_SIZE}, ETH: ${KRAKEN_ETH_ORDER_SIZE}, SOL: ${KRAKEN_SOL_ORDER_SIZE}`);
 
+  // Optional debugging function to understand Kraken's asset pair format
+  const debugKrakenAssetPair = async (asset) => {
+    console.log(`==== Debugging ${asset.symbol} pricing ====`);
+    const response = await queryPublicApi(
+      "AssetPairs",
+      `pair=${asset.symbol.toLowerCase()}${CURRENCY.toLowerCase()}`
+    );
+    console.log(JSON.stringify(response, null, 2));
+    console.log(`==== End debugging ${asset.symbol} ====`);
+  };
+
   const runner = async () => {
+    // Debug SOL pricing on startup to help understand the API response format
+    await debugKrakenAssetPair(cryptoAssets.SOL);
+    
     while (true) {
       try {
         let buyOrderExecuted = false;
@@ -345,15 +359,59 @@ const main = async () => {
     return signatureString;
   };
 
+  // Updated to handle different asset formats in Kraken API
   const fetchCryptoPrice = async (asset) => {
-    return Number(
-      (
-        await queryPublicApi(
-          "Ticker",
-          `pair=${cryptoPrefix}${asset.symbol}${fiatPrefix}${CURRENCY}`
-        )
-      )?.result?.[`${cryptoPrefix}${asset.symbol}${fiatPrefix}${CURRENCY}`]?.p?.[0]
+    // Different pair format depending on the asset
+    let pairString;
+    let resultKeyToFind;
+
+    if (asset.symbol === "XBT" || asset.symbol === "ETH") {
+      // Traditional assets use the X/Z prefix format
+      pairString = `${cryptoPrefix}${asset.symbol}${fiatPrefix}${CURRENCY}`;
+      resultKeyToFind = pairString;
+    } else {
+      // Newer assets like SOL just use the plain format
+      pairString = `${asset.symbol}${CURRENCY}`;
+      resultKeyToFind = pairString;
+    }
+    
+    const pairQuery = pairString.toLowerCase();
+    console.log(`Fetching price for ${asset.symbol} with query: pair=${pairQuery}`);
+    
+    const response = await queryPublicApi(
+      "Ticker",
+      `pair=${pairQuery}`
     );
+    
+    if (response?.error?.length > 0) {
+      console.error(`Error fetching ${asset.symbol} price:`, response.error);
+      return null;
+    }
+    
+    // Try to find the right key in the response
+    if (response?.result) {
+      // Try the exact key match first
+      if (response.result[resultKeyToFind]) {
+        return Number(response.result[resultKeyToFind]?.p?.[0]);
+      }
+      
+      // If not found, try to find any key that contains the asset symbol and currency
+      const resultKeys = Object.keys(response.result);
+      console.log(`Found result keys for ${asset.symbol}:`, resultKeys);
+      
+      const matchingKey = resultKeys.find(key => 
+        key.toUpperCase().includes(asset.symbol.toUpperCase()) && 
+        key.toUpperCase().includes(CURRENCY.toUpperCase())
+      );
+      
+      if (matchingKey) {
+        console.log(`Using matching key for ${asset.symbol}: ${matchingKey}`);
+        return Number(response.result[matchingKey]?.p?.[0]);
+      }
+    }
+    
+    console.error(`Could not find price data for ${asset.symbol} in response:`, response);
+    return null;
   };
 
   const buyCrypto = async (asset) => {
@@ -382,9 +440,14 @@ const main = async () => {
     }
   };
 
+  // Updated to handle different asset pair formats
   const executeBuyOrder = async (asset) => {
     const privateEndpoint = "AddOrder";
-    const privateInputParameters = `pair=${asset.symbol.toLowerCase()}${CURRENCY.toLowerCase()}&type=buy&ordertype=market&volume=${asset.orderSize}`;
+    const pairName = `${asset.symbol.toLowerCase()}${CURRENCY.toLowerCase()}`;
+    const privateInputParameters = `pair=${pairName}&type=buy&ordertype=market&volume=${asset.orderSize}`;
+    
+    console.log(`Executing buy order: ${privateInputParameters}`);
+    
     let privateResponse = "";
     privateResponse = await queryPrivateApi(
       privateEndpoint,
